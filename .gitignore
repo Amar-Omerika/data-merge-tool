@@ -1,0 +1,9 @@
+build/bin
+node_modules
+frontend/dist
+# Ignore Excel output files and temporary files
+output/
+*.xlsx
+*.xls~
+*.tmp
+.DS_Store
