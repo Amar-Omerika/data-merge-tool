@@ -41,5 +41,10 @@
     margin-top: 20px;
     padding: 10px;
     border-radius: 4px;
-    background-color: #f3f4f6;
+    background-color: lightblue;
+    color: #333;
+  }
+  .messages-container{
+    max-height: 300px;
+    overflow-y: auto;
   }

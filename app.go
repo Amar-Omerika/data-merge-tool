@@ -29,6 +29,36 @@ func (a *App) startup(ctx context.Context) {
     a.ctx = ctx
     runtime.LogInfof(ctx, "App started")
 }
+// OpenMultiplePDFDialog allows selecting multiple PDF files
+func (a *App) OpenMultiplePDFDialog() ([]string, error) {
+    opts := runtime.OpenDialogOptions{
+        Title: "Select PDF Files",
+        Filters: []runtime.FileFilter{
+            {
+                DisplayName: "PDF files (*.pdf)",
+                Pattern:     "*.pdf",
+            },
+        },
+    }
+    return runtime.OpenMultipleFilesDialog(a.ctx, opts)
+}
+
+// ProcessMultiplePDFs processes multiple PDF files
+func (a *App) ProcessMultiplePDFs(pdfPaths []string) ([]string, []error) {
+    results := make([]string, 0, len(pdfPaths))
+    errors := make([]error, 0)
+    
+    for _, pdfPath := range pdfPaths {
+        result, err := a.ProcessPDF(pdfPath)
+        if err != nil {
+            errors = append(errors, fmt.Errorf("%s: %w", filepath.Base(pdfPath), err))
+        } else {
+            results = append(results, result)
+        }
+    }
+    
+    return results, errors
+}
 
 // ProcessPDF is the function called from JS
 func (a *App) ProcessPDF(pdfPath string) (string, error) {
