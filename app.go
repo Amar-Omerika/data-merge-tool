@@ -61,52 +61,119 @@ func (a *App) OpenPDFDialog() (string, error) {
     return runtime.OpenFileDialog(a.ctx, opts)
 }
 func extractDataFromPDF(pdfPath string) ([]string, map[string]string, error) {
-	f, r, err := pdf.Open(pdfPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer f.Close()
+    f, r, err := pdf.Open(pdfPath)
+    if err != nil {
+        return nil, nil, err
+    }
+    defer f.Close()
 
-	var barcodes []string
-	amounts := make(map[string]string)
-	barcodeSet := make(map[string]bool)
+    var barcodes []string
+    amounts := make(map[string]string)
+    barcodeSet := make(map[string]bool)
 
-	barcodeRegex := regexp.MustCompile(`\b\d{13}\b`)
-	amountRegex := regexp.MustCompile(`\b(\d{1,3}(?:[.,]\d{2}))\b`)
+    // Regex to find 13-digit barcodes
+    barcodeRegex := regexp.MustCompile(`\b\d{13}\b`)
+    
+    // Updated regex patterns to find Kol. Jmj values
+    // Pattern 1: Look for "Kol. Jmj" column value
+    kolJmjRegex := regexp.MustCompile(`Kol\.\s+Jmj\s+VPC\s+Rab%[\s\S]*?(\d+,\d{2})`)
+    
+    // Pattern 2: Look for the structure "number + t + amount"
+    productRegex := regexp.MustCompile(`\d+\s+t\s+(\d+,\d{2})`)
+    
+    // Pattern 3: Look for "Tabs" followed by a value (fallback)
+    tabsRegex := regexp.MustCompile(`Tabs\s+(\d+[.,]\d{2})`)
 
-	totalPages := r.NumPage()
+    totalPages := r.NumPage()
 
-	for pageIndex := 1; pageIndex <= totalPages; pageIndex++ {
-		page := r.Page(pageIndex)
-		content, err := page.GetPlainText(nil)
-		if err != nil {
-			return nil, nil, err
-		}
+    for pageIndex := 1; pageIndex <= totalPages; pageIndex++ {
+        page := r.Page(pageIndex)
+        content, err := page.GetPlainText(nil)
+        if err != nil {
+            return nil, nil, err
+        }
 
-		foundBarcodes := barcodeRegex.FindAllStringIndex(content, -1)
+        // Print entire content for debugging
+        fmt.Printf("Page %d content: %s\n", pageIndex, content)
 
-		for _, match := range foundBarcodes {
-			barcode := content[match[0]:match[1]]
-			if barcodeSet[barcode] {
-				continue
-			}
+        foundBarcodes := barcodeRegex.FindAllStringIndex(content, -1)
 
-			endIndex := match[1] + 100
-			if endIndex > len(content) {
-				endIndex = len(content)
-			}
-			contextAfter := content[match[1]:endIndex]
+        for _, match := range foundBarcodes {
+            barcode := content[match[0]:match[1]]
+            if barcodeSet[barcode] {
+                continue
+            }
 
-			amountMatch := amountRegex.FindStringSubmatch(contextAfter)
-			if len(amountMatch) > 1 {
-				rawAmount := strings.Replace(amountMatch[1], ",", ".", 1)
-				barcodes = append(barcodes, barcode)
-				amounts[barcode] = rawAmount
-				barcodeSet[barcode] = true
-			}
-		}
-	}
-	return barcodes, amounts, nil
+            // Look in a wider context for the Kol. Jmj value
+            // Search both before and after the barcode
+            startContext := match[0] - 300
+            if startContext < 0 {
+                startContext = 0
+            }
+            endContext := match[1] + 300
+            if endContext > len(content) {
+                endContext = len(content)
+            }
+            
+            surroundingContext := content[startContext:endContext]
+            
+            // Try first pattern - structured table with Kol. Jmj header
+            kolMatch := kolJmjRegex.FindStringSubmatch(surroundingContext)
+            if len(kolMatch) > 1 {
+                rawAmount := strings.Replace(kolMatch[1], ",", ".", 1)
+                barcodes = append(barcodes, barcode)
+                amounts[barcode] = rawAmount
+                barcodeSet[barcode] = true
+                fmt.Printf("Found barcode %s with Kol. Jmj quantity %s\n", barcode, rawAmount)
+                continue
+            }
+            
+            // Try second pattern - product description with quantity
+            productMatch := productRegex.FindStringSubmatch(surroundingContext)
+            if len(productMatch) > 1 {
+                rawAmount := strings.Replace(productMatch[1], ",", ".", 1)
+                barcodes = append(barcodes, barcode)
+                amounts[barcode] = rawAmount
+                barcodeSet[barcode] = true
+                fmt.Printf("Found barcode %s with product quantity %s\n", barcode, rawAmount)
+                continue
+            }
+            
+            // Try third pattern - Tabs followed by value
+            tabsMatch := tabsRegex.FindStringSubmatch(surroundingContext)
+            if len(tabsMatch) > 1 {
+                rawAmount := strings.Replace(tabsMatch[1], ",", ".", 1)
+                barcodes = append(barcodes, barcode)
+                amounts[barcode] = rawAmount
+                barcodeSet[barcode] = true
+                fmt.Printf("Found barcode %s with Tabs quantity %s\n", barcode, rawAmount)
+                continue
+            }
+            
+            // If none of the patterns matched, look for any number close to the barcode
+            // that might represent the quantity
+            simpleNumberRegex := regexp.MustCompile(`(\d+[.,]\d{2})`)
+            numberMatches := simpleNumberRegex.FindAllStringSubmatch(surroundingContext, -1)
+            if len(numberMatches) > 0 {
+                // Use a value that's about 50 chars before or after the barcode
+                // This is a last resort fallback
+                for _, numMatch := range numberMatches {
+                    numPos := strings.Index(surroundingContext, numMatch[0])
+                    barcodePos := strings.Index(surroundingContext, barcode)
+                    distance := numPos - barcodePos
+                    if distance > -50 && distance < 100 {
+                        rawAmount := strings.Replace(numMatch[1], ",", ".", 1)
+                        barcodes = append(barcodes, barcode)
+                        amounts[barcode] = rawAmount
+                        barcodeSet[barcode] = true
+                        fmt.Printf("Found barcode %s with nearby quantity %s\n", barcode, rawAmount)
+                        break
+                    }
+                }
+            }
+        }
+    }
+    return barcodes, amounts, nil
 }
 
 func updateExcelWithData(excelPath, outputDir, outputName string, barcodes []string, amounts map[string]string) error {
@@ -131,17 +198,19 @@ func updateExcelWithData(excelPath, outputDir, outputName string, barcodes []str
 
 	if len(rows) > 0 {
 		for i, cell := range rows[0] {
-			if strings.Contains(strings.ToLower(cell), "bar code") {
+			cellLower := strings.ToLower(cell)
+			// Fix: "Siframat" to "Siframat" (remove the extra 'i')
+			if strings.Contains(cellLower, "siframat") {
 				barcodeCol = i
 			}
-			if strings.Contains(strings.ToLower(cell), "kol") {
+			if strings.Contains(cellLower, "količina") {
 				amountCol = i
 			}
 		}
 	}
 
 	if barcodeCol == -1 || amountCol == -1 {
-		return fmt.Errorf("could not detect 'Bar Code' or 'Kol.' columns in Excel")
+		return fmt.Errorf("could not detect 'Siframat' or 'količina.' columns in Excel")
 	}
 
 	for rowIndex, row := range rows {
