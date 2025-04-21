@@ -34,14 +34,28 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) ProcessPDF(pdfPath string) (string, error) {
     pdfName := filepath.Base(pdfPath)
     pdfNameWithoutExt := strings.TrimSuffix(pdfName, filepath.Ext(pdfName))
-    outputPath := filepath.Join("output", pdfNameWithoutExt+".xlsx")
+    
+    // Get desktop path
+    desktopDir, err := os.UserHomeDir()
+    if err != nil {
+        return "", err
+    }
+    desktopDir = filepath.Join(desktopDir, "Desktop")
+    
+    // Create CM-Done folder on desktop
+    outputDir := filepath.Join(desktopDir, "CM-Done")
+    if err := os.MkdirAll(outputDir, 0755); err != nil {
+        return "", err
+    }
+    
+    outputPath := filepath.Join(outputDir, pdfNameWithoutExt+".xlsx")
 
     barcodes, amounts, err := extractDataFromPDF(pdfPath)
     if err != nil {
         return "", err
     }
 
-    err = updateExcelWithData("Template.xlsx", "output", pdfNameWithoutExt, barcodes, amounts)
+    err = updateExcelWithData("Template.xlsx", outputDir, pdfNameWithoutExt, barcodes, amounts)
     if err != nil {
         return "", err
     }
