@@ -117,24 +117,9 @@ func extractDataFromPDF(pdfPath string) ([]string, map[string]string, error) {
 	amounts := make(map[string]string)
 	barcodeSet := make(map[string]bool)
 
-	// Regex to find 13-digit barcodes
 	barcodeRegex := regexp.MustCompile(`\b\d{13}\b`)
 
-	// We need a highly precise extraction that specifically targets the Kol.Jmj column
-	// This is based on the exact PDF layout from the image
-
-	// This regex specifically looks for the pattern: a numeric value followed by 'Tabs' which is in the Kol.Jmj column
-	kolJmjPattern := regexp.MustCompile(`(\d+[.,]\d{2})\s+Tabs`)
-
-	// For the barcode 5903246229516 shown in the image, which has OST MAGNESIUM CITRAT product
-	// We create a specific pattern matching exactly the format seen in the sample
-	magnesiumPattern := regexp.MustCompile(`OST MAGNESIUM CITRAT.+?\s+(\d+[.,]\d{2})\s+Tabs`)
-
-	// This targets just the table structure with precise offsets for the Kol.Jmj column (column 4)
-	tablePattern := regexp.MustCompile(`(?:Rb|Rb\s+Sifra)\s+Sifra\s+Naziv\s+Kol\.\s*Jmj\s+VPC[\r\n\s]+\d+\s+\d+\s+.+?\s+(\d+[.,]\d{2})\s+Tabs`)
-
 	totalPages := r.NumPage()
-
 	for pageIndex := 1; pageIndex <= totalPages; pageIndex++ {
 		page := r.Page(pageIndex)
 		content, err := page.GetPlainText(nil)
@@ -142,83 +127,51 @@ func extractDataFromPDF(pdfPath string) ([]string, map[string]string, error) {
 			return nil, nil, err
 		}
 
-		foundBarcodes := barcodeRegex.FindAllStringIndex(content, -1)
+		lines := strings.Split(content, "\n")
+		headerIdx := -1
+		kolJmjCol := -1
+		barcodeCol := -1
 
-		for _, match := range foundBarcodes {
-			barcode := content[match[0]:match[1]]
-			if barcodeSet[barcode] {
-				continue
-			}
-
-			// Look in a wider context for the Kol. Jmj value
-			// Search both before and after the barcode
-			startContext := match[0] - 300
-			if startContext < 0 {
-				startContext = 0
-			}
-			endContext := match[1] + 300
-			if endContext > len(content) {
-				endContext = len(content)
-			}
-
-			surroundingContext := content[startContext:endContext]
-
-			// First try the most specific pattern for Magnesium Citrat product
-			magnesiumMatch := magnesiumPattern.FindStringSubmatch(surroundingContext)
-			if len(magnesiumMatch) > 1 {
-				rawAmount := strings.Replace(magnesiumMatch[1], ",", ".", 1)
-				barcodes = append(barcodes, barcode)
-				amounts[barcode] = formatNumber(rawAmount)
-				barcodeSet[barcode] = true
-				fmt.Printf(" Found barcode %s with magnesium pattern - Kol.Jmj quantity: %s\n", barcode, amounts[barcode])
-				continue
-			}
-
-			// Try the table structure pattern with specific column positioning
-			tableMatch := tablePattern.FindStringSubmatch(surroundingContext)
-			if len(tableMatch) > 1 {
-				rawAmount := strings.Replace(tableMatch[1], ",", ".", 1)
-				barcodes = append(barcodes, barcode)
-				amounts[barcode] = formatNumber(rawAmount)
-				barcodeSet[barcode] = true
-				fmt.Printf(" Found barcode %s with table pattern - Kol.Jmj quantity: %s\n", barcode, amounts[barcode])
-				continue
-			}
-
-			// Look for the quantity-tabs pattern which appears in the Kol.Jmj column
-			// We need to find the closest occurrence to the barcode
-			kolMatches := kolJmjPattern.FindAllStringSubmatch(surroundingContext, -1)
-			if len(kolMatches) > 0 {
-				// Find closest match by physical distance in the text
-				closestMatch := ""
-				closestDistance := 1000
-
-				for _, match := range kolMatches {
-					// Find the distance between this match and the barcode
-					matchPos := strings.Index(surroundingContext, match[0])
-					barcodePos := strings.Index(surroundingContext, barcode)
-					distance := abs(matchPos - barcodePos)
-
-					// Only consider matches that come AFTER the barcode and are reasonably close
-					if distance < closestDistance && matchPos > barcodePos && distance < 200 {
-						closestDistance = distance
-						closestMatch = match[1]
-					}
+		// Find header row and column indices
+		for idx, line := range lines {
+			cols := strings.Fields(line)
+			for i, col := range cols {
+				if strings.HasPrefix(strings.ToLower(col), "kol.") || strings.Contains(strings.ToLower(col), "jmj") {
+					kolJmjCol = i
 				}
-
-				if closestMatch != "" {
-					rawAmount := strings.Replace(closestMatch, ",", ".", 1)
-					barcodes = append(barcodes, barcode)
-					amounts[barcode] = formatNumber(rawAmount)
-					barcodeSet[barcode] = true
-					fmt.Printf(" Found barcode %s with Kol.Jmj pattern - quantity: %s (distance: %d)\n", barcode, amounts[barcode], closestDistance)
-					continue
+				if strings.Contains(strings.ToLower(col), "sifra") || strings.Contains(strings.ToLower(col), "barcode") {
+					barcodeCol = i
 				}
 			}
+			if kolJmjCol != -1 && barcodeCol != -1 {
+				headerIdx = idx
+				break
+			}
+		}
 
-			// If none of the patterns matched, look
-			// Last resort: Debug print of the surrounding context to help diagnose issues
-			fmt.Printf(" Could not find Kol.Jmj for barcode %s. Context: %.100s...\n", barcode, surroundingContext)
+		if headerIdx == -1 || kolJmjCol == -1 || barcodeCol == -1 {
+			continue // Could not find header or required columns
+		}
+
+		// Process data rows
+		for i := headerIdx + 1; i < len(lines); i++ {
+			cols := strings.Fields(lines[i])
+			if len(cols) <= kolJmjCol || len(cols) <= barcodeCol {
+				continue
+			}
+			barcodeCandidate := cols[barcodeCol]
+			if !barcodeRegex.MatchString(barcodeCandidate) {
+				continue
+			}
+			if barcodeSet[barcodeCandidate] {
+				continue
+			}
+			qtyRaw := cols[kolJmjCol]
+			qtyRaw = strings.Replace(qtyRaw, ",", ".", 1)
+			barcodes = append(barcodes, barcodeCandidate)
+			amounts[barcodeCandidate] = formatNumber(qtyRaw)
+			barcodeSet[barcodeCandidate] = true
+			fmt.Printf(" Found barcode %s with Kol.Jmj value: %s\n", barcodeCandidate, amounts[barcodeCandidate])
 		}
 	}
 	return barcodes, amounts, nil
